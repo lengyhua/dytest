@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -76,22 +77,29 @@ func ReadDir(dir string) ([]IdStruct, error) {
 }
 
 const (
-	NotFound           string = "未找到"
-	SmallSize          string = "宽高不满足要求"
-	SingleArchiveTrash string = "单档案"
-	BigArchiveTrash    string = "大档案"
-	NoLinkArchiveTrash string = "无关联档案"
-	UnLinkArchiveTrash string = "关联人脸未入档"
-	SplitArchiveTrash  string = "分裂档案"
+	NotFound            string = "未找到"
+	SmallSize           string = "宽高不满足要求"
+	SingleArchiveTrash  string = "单档案"
+	BigArchiveTrash     string = "大档案"
+	NoLinkArchiveTrash  string = "无关联档案"
+	UnLinkArchiveTrash  string = "关联人脸未入档"
+	RawArchiveToAnalyze string = "初始档案待分析"
+	SplitArchiveTrash   string = "分裂档案"
+	DeviceNotArchived   string = "设备未聚档"
 )
 
 type S3Result struct {
-	Id          string
-	BigArchives []BigArchive
-	SingleArchive
+	Id             string
+	BigArchives    []BigArchive
+	SingleArchive  []SingleArchive
 	UnlinkArchives []UnlinkArchive
 	NolinkArchives []NolinkArchive
 	SplitArchives  []SplitArchive
+	RawArchives    []RawArchive
+}
+
+type IdListable interface {
+	Ids() []string
 }
 
 type BigArchive struct {
@@ -101,11 +109,23 @@ type BigArchive struct {
 	Tracks    []string `json:"archive"`
 }
 
-type SingleArchive []string
+func (b BigArchive) Ids() []string {
+	return b.Tracks
+}
+
+type SingleArchive string
+
+func (s SingleArchive) Ids() []string {
+	return []string{string(s)}
+}
 
 type UnlinkArchive struct {
 	ArchiveId string   `json:"archiveId"`
 	PersonIds []string `json:"personIds"`
+}
+
+func (u UnlinkArchive) Ids() []string {
+	return u.PersonIds
 }
 
 type SplitArchive struct {
@@ -115,12 +135,24 @@ type SplitArchive struct {
 	Tracks     []string       `json:"archive"`
 }
 
-type NolinkArchive UnlinkArchive
+func (s SplitArchive) Ids() []string {
+	return s.Tracks
+}
 
-func (r S3Result) TrashInfo(id string) (string, interface{}) {
-	if utils.IsIn(r.SingleArchive, id) {
-		return SingleArchiveTrash, id
+type NolinkArchive struct {
+	UnlinkArchive
+}
+type RawArchive struct {
+	UnlinkArchive
+}
+
+func (r S3Result) TrashInfo(id string) (string, IdListable) {
+	for _, s := range r.SingleArchive {
+		if string(s) == id {
+			return SingleArchiveTrash, s
+		}
 	}
+
 	for _, bigArchive := range r.BigArchives {
 		if utils.IsIn(bigArchive.Tracks, id) {
 			return BigArchiveTrash, bigArchive
@@ -141,6 +173,13 @@ func (r S3Result) TrashInfo(id string) (string, interface{}) {
 			return SplitArchiveTrash, splitArchive
 		}
 	}
+
+	for _, rawArchive := range r.RawArchives {
+		if utils.IsIn(rawArchive.PersonIds, id) {
+			return RawArchiveToAnalyze, rawArchive
+		}
+	}
+
 	return NotFound, nil
 }
 
@@ -152,32 +191,74 @@ func ReadTaskResult(root string, tasks []string) ([]S3Result, error) {
 		bigArchivePath := filepath.Join(root, r.Id, "Archive", "Big-Archive")
 		b, err := ioutil.ReadFile(bigArchivePath)
 		if err != nil {
-			log.Println("read big archive error: ", bigArchivePath, err)
+			if !os.IsNotExist(err) {
+				log.Println("read big archive error: ", bigArchivePath, err)
+			}
 		} else {
 			json.Unmarshal(b, &r.BigArchives)
 		}
 		singleArchivePath := filepath.Join(root, r.Id, "Archive", "Single-Archive")
 		b, err = ioutil.ReadFile(singleArchivePath)
 		if err != nil {
-			log.Println("read single archive error: ", singleArchivePath, err)
+			if !os.IsNotExist(err) {
+				log.Println("read single archive error: ", singleArchivePath, err)
+			}
 		} else {
 			json.Unmarshal(b, &r.SingleArchive)
 		}
 		noLinkArchivePath := filepath.Join(root, r.Id, "Archive", "No-Linked-Archive")
 		b, err = ioutil.ReadFile(noLinkArchivePath)
 		if err != nil {
-			log.Println("read no link archive error: ", noLinkArchivePath, err)
+			if !os.IsNotExist(err) {
+				log.Println("read no link archive error: ", noLinkArchivePath, err)
+			}
 		} else {
 			json.Unmarshal(b, &r.NolinkArchives)
+		}
+		unLinkArchivePath := filepath.Join(root, r.Id, "Archive", "Un-Linked-Archive")
+		b, err = ioutil.ReadFile(unLinkArchivePath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Println("read un link archive error: ", unLinkArchivePath, err)
+			}
+		} else {
+			json.Unmarshal(b, &r.UnlinkArchives)
 		}
 		splitArchivePath := filepath.Join(root, r.Id, "Archive", "Split-Archive")
 		b, err = ioutil.ReadFile(splitArchivePath)
 		if err != nil {
-			log.Println("read split archive error: ", singleArchivePath, err)
+			if !os.IsNotExist(err) {
+				log.Println("read split archive error: ", splitArchivePath, err)
+			}
 		} else {
 			json.Unmarshal(b, &r.SplitArchives)
+		}
+		rawArchivePath := filepath.Join(root, r.Id, "Archive", "Raw-Archive")
+		b, err = ioutil.ReadFile(rawArchivePath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				log.Println("read raw archive error: ", rawArchivePath, err)
+			}
+		} else {
+			json.Unmarshal(b, &r.RawArchives)
 		}
 		result = append(result, r)
 	}
 	return result, nil
+}
+
+func processRawFile(file string) []string {
+	// dir, fileName := filepath.Split(file)
+	// ext := path.Ext(fileName)
+	// base := path.Base(fileName)
+	// idFile = base + "_id." + ext
+
+	// bytes, err := ioutil.ReadAll(file)
+
+	// if err != nil {
+	// 	log.Fatalln("error process file: ", file)
+	// }
+
+	return nil
+
 }

@@ -163,3 +163,21 @@ func QueryTask(conn *sql.DB, date string) []string {
 	log.Println("person task to analyze: ", result)
 	return result
 }
+
+func QueryPersonArchiveIds(conn *sql.DB, ids []string) []string {
+	sqlStr := fmt.Sprintf("select device_id from pvid_system.device_info where device_id in ('%s') and archive_type = 2", strings.Join(ids, "','"))
+	log.Println("query person archive device")
+	rs, err := conn.Query(sqlStr)
+	if err != nil {
+		log.Println("query person archive device err: ", err)
+		return nil
+	}
+	result := make([]string, 0)
+	for rs.Next() {
+		var id string
+		rs.Scan(&id)
+		result = append(result, id)
+	}
+	log.Println("person device id: ", result)
+	return result
+}

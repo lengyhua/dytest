@@ -43,12 +43,13 @@ var (
 )
 
 type AnalyzeResult struct {
-	SnapInfo      SnapInfo
-	Name          string
-	DeviceIds     []string
-	PeopleInfos   []PeopleInfo
-	FaceDiscards  []FaceDiscard
-	PersonDiscard []PersonDiscard
+	SnapInfo            SnapInfo
+	Name                string
+	DeviceIds           []string
+	PersonArchiveDevice []string
+	PeopleInfos         []PeopleInfo
+	FaceDiscards        []FaceDiscard
+	PersonDiscard       []PersonDiscard
 }
 
 func (r AnalyzeResult) Write(writer *os.File) {
@@ -121,13 +122,14 @@ func (f FaceDiscard) Write(writer *os.File) {
 
 type PersonDiscard struct {
 	Id                string
+	DeviceId          string
 	DiscardReason     string
 	WorkTask          string
 	PersonArchiveInfo interface{}
 }
 
 func (p PersonDiscard) Write(writer *os.File) {
-	writer.WriteString(fmt.Sprintf("|任务: %s, 丢弃原因: %s, 人体抓拍: %s\n", p.WorkTask, p.DiscardReason, p.Id))
+	writer.WriteString(fmt.Sprintf("|任务: %s, 丢弃原因: %s, 人体抓拍: %s, 设备ID: %s\n", p.WorkTask, p.DiscardReason, p.Id, p.DeviceId))
 	writer.WriteString(fmt.Sprintf("|详情: %v\n", p.PersonArchiveInfo))
 }
 
@@ -177,11 +179,14 @@ func processSnapInfo(conn *sql.DB, idStruct file.IdStruct, result *AnalyzeResult
 
 func processPersonTrash(idStruct file.IdStruct, result *AnalyzeResult, conn *sql.DB) {
 	log.Println("start to process person trash")
+	log.Println("person ids: {}", idStruct.PersonIds)
+	log.Println("person tracks: {}", result.personTrackIds())
 	personTrashIds := utils.Substract(idStruct.PersonIds, result.personTrackIds())
+	log.Println("person trash id: ", personTrashIds)
 	personDiscardMap := make(map[string]PersonDiscard)
 	pis := db.QueryPerson(conn, personTrashIds)
 	for _, pi := range pis {
-		personDiscard := PersonDiscard{Id: pi.PersonId}
+		personDiscard := PersonDiscard{Id: pi.PersonId, DeviceId: pi.DeviceId}
 		if pi.Height < 150 || pi.Width < 60 {
 			personDiscard.DiscardReason = file.SmallSize
 		}
@@ -189,25 +194,58 @@ func processPersonTrash(idStruct file.IdStruct, result *AnalyzeResult, conn *sql
 	}
 	d := db.Connect(db.PG, pconn)
 	tasks := db.QueryTask(d, date)
+	personArchived := db.QueryPersonArchiveIds(d, result.SnapInfo.PersonDevices)
+	personArchivedMap := make(map[string]struct{})
+	for _, dId := range personArchived {
+		personArchivedMap[dId] = struct{}{}
+	}
 	s3Results, err := file.ReadTaskResult(root, tasks)
 	if err == nil {
 		for k, v := range personDiscardMap {
+			if _, ok := personArchivedMap[v.DeviceId]; !ok {
+				v.DiscardReason = file.DeviceNotArchived
+				personDiscardMap[v.Id] = v
+			}
 			if v.DiscardReason == "" {
-				for _, r := range s3Results {
-					discardReason, info := r.TrashInfo(v.Id)
-					if discardReason != file.NotFound {
-						v.DiscardReason = discardReason
-						v.WorkTask = r.Id
-						v.PersonArchiveInfo = info
-						personDiscardMap[k] = v
-						break
-					}
-				}
+				processDiscardReason(s3Results, v, personDiscardMap, k, conn)
 			}
 		}
 	}
 	for _, d := range personDiscardMap {
 		result.PersonDiscard = append(result.PersonDiscard, d)
+	}
+}
+
+func processDiscardReason(s3Results []file.S3Result, v PersonDiscard,
+	personDiscardMap map[string]PersonDiscard, k string, conn *sql.DB) {
+	for _, r := range s3Results {
+		discardReason, info := r.TrashInfo(v.Id)
+		if discardReason == file.NotFound {
+			continue
+		}
+		v.DiscardReason = discardReason
+		v.WorkTask = r.Id
+		v.PersonArchiveInfo = info
+		personDiscardMap[k] = v
+		if discardReason == file.RawArchiveToAnalyze {
+			s := info.Ids()
+			personInfos := db.QueryPerson(conn, s)
+			linkFaceIds := make([]string, 0)
+			for _, person := range personInfos {
+				if person.LinkFaceId != "" {
+					linkFaceIds = append(linkFaceIds, person.LinkFaceId)
+				}
+			}
+			if len(linkFaceIds) == 0 {
+				v.DiscardReason = file.NoLinkArchiveTrash
+			} else {
+				t := db.QueryTrack(conn, linkFaceIds)
+				if len(t) == 0 {
+					v.DiscardReason = file.UnLinkArchiveTrash
+				}
+			}
+		}
+		return
 	}
 }
 
@@ -245,7 +283,7 @@ func processTracks(conn *sql.DB, idStruct file.IdStruct, result *AnalyzeResult) 
 				people.FaceTracks = append(people.FaceTracks, t.SnapId)
 			} else {
 				people.PersonDevice = append(people.PersonDevice, t.DeviceId)
-				people.FaceTracks = append(people.FaceTracks, t.SnapId)
+				people.PersonTracks = append(people.PersonTracks, t.SnapId)
 			}
 		}
 		result.DeviceIds = utils.RemoveDeplicated(result.DeviceIds)
